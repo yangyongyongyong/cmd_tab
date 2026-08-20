@@ -1,0 +1,42 @@
+{
+  "title": "当前屏幕内应用切换",
+  "rules": [
+    {
+      "description": "Cmd+Tab 交给 Hammerspoon，只在当前屏幕内切换应用",
+      "manipulators": [
+        {
+          "type": "basic",
+          "from": {
+            "key_code": "tab",
+            "modifiers": {
+              "mandatory": ["command", "shift"],
+              "optional": ["caps_lock"]
+            }
+          },
+          "to": [
+            {
+              "key_code": "f19",
+              "modifiers": ["left_command", "left_shift"]
+            }
+          ]
+        },
+        {
+          "type": "basic",
+          "from": {
+            "key_code": "tab",
+            "modifiers": {
+              "mandatory": ["command"],
+              "optional": ["caps_lock"]
+            }
+          },
+          "to": [
+            {
+              "key_code": "f18",
+              "modifiers": ["left_command"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
