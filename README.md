@@ -26,7 +26,7 @@
 - 左键拖动 App 图标到其他屏幕行：把该 App 的代表窗口移动到目标屏幕。
 - 拖动时 App ghost 会跟随鼠标，目标屏幕行会高亮；释放在原屏幕行或空白处会取消移动。
 
-# 安装
+## 安装
 
 ```bash
 git clone https://github.com/yangyongyongyong/cmd_tab.git
