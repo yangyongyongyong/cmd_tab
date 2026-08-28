@@ -12,7 +12,7 @@ macOS 原生 `Cmd+Tab` 是全局 App MRU 列表。双屏或多屏时，用户在
 - `Cmd+Shift+Tab` 反向切换。
 - 当前屏幕默认指当前焦点窗口所在屏幕。
 - 可选项：允许改成鼠标所在屏幕。
-- 每个 App 只参与一次候选列表，取当前屏幕上最靠前的一个窗口。
+- 当前屏幕行中，多窗口 App 按窗口展开为多个候选项，单窗口 App 仍作为一个候选项。
 - 按住 `Cmd` 后，多次按 `Tab` 应能选择更老的 App，不能只在最近两个 App 之间来回跳。
 - 松开 `Cmd` 后聚焦选中的 App。
 - 显示类似原生切换器的悬浮图标面板。
@@ -23,9 +23,9 @@ macOS 原生 `Cmd+Tab` 是全局 App MRU 列表。双屏或多屏时，用户在
 - 悬浮面板应按屏幕分多行展示，第一行是当前屏幕，其他行分别对应其他屏幕。
 - 普通 `Cmd+Tab` 键盘循环仍只在当前屏幕行内进行。
 - 鼠标点击其他屏幕行的 App 时，才允许跨屏聚焦。
-- 如果 App 在所在屏幕有多个窗口，App 图标应显示窗口数量角标。
-- 确认多窗口 App 时自动进入第二层窗口选择，而不是立刻切到代表窗口。
-- 第二层使用窗口标题列表，`Tab` / `Shift+Tab` 或 `↑/↓` 选择窗口，`Enter` 确认，`Esc` 返回 App 选择层。
+- 当前屏幕行如果 App 有多个窗口，应展开成多个窗口 tile，共用同一个 App 图标。
+- 多窗口 tile 不显示 App 名，只显示窗口标题，最多两行；两行放不下时才省略。
+- 不再使用第二层窗口选择菜单；窗口切换应在第一层完成。
 - 右键 App 图标弹出管理菜单，不要右键直接退出。
 - 管理菜单提供隐藏 App、关闭当前窗口、退出 App、取消；按住 `Option` 右键时额外提供强制退出。
 - 通过切换器聚焦窗口后，默认把窗口铺满当前屏幕可用区域；不要使用 macOS 原生全屏。
@@ -95,10 +95,11 @@ macOS 原生 `Cmd+Tab` 是全局 App MRU 列表。双屏或多屏时，用户在
 - 使用 `hs.window.orderedWindows()` 获取 MRU 顺序。
 - 过滤 `window:isStandard()`、`window:isVisible()`、`not window:isMinimized()`。
 - 用 `window:screen()` 与当前屏幕匹配。
-- 用 App 的 `bundleID` 去重，每个 App 只保留第一个窗口。
+- 其他屏幕行用 App 的 `bundleID` 去重，每个 App 只保留第一个窗口。
+- 当前屏幕行按窗口展开，一个 App 的多个窗口会变成多个 tile。
 - 候选顺序优先使用当前屏幕自己的 App MRU，再用 `hs.window.orderedWindows()` 补齐当前可见但还没有历史记录的 App。
-- 每个候选 App 还应保存同 App、同屏幕的所有窗口：`candidate.windows` 和 `candidate.windowCount`。
-- `candidate.window` 是默认代表窗口，通常取 `candidate.windows[1]`。
+- 当前屏幕展开候选时，每个 tile 的 `candidate.window` 是具体窗口，`candidate.name` 使用窗口标题。
+- 其他屏幕聚合候选仍保存同 App、同屏幕的所有窗口：`candidate.windows` 和 `candidate.windowCount`。
 
 每屏独立 MRU：
 
@@ -142,9 +143,9 @@ Cmd 释放：
 - 使用 `hs.canvas`。
 - 面板放在当前屏幕中心。
 - 按屏幕分多行绘制，第一行标题是当前屏幕，其他行标题是其他屏幕。
-- 每个候选项显示 App icon 和 App name。
+- 每个候选项显示 App icon；普通 App tile 显示 App 名，多窗口展开后的窗口 tile 显示窗口标题。
 - 只有当前屏幕行的可见候选项显示数字角标 `1-9`。
-- 如果 `candidate.windowCount > 1`，App 图标右上角显示 `2窗`、`3窗` 这类窗口数量角标。
+- 当前屏幕展开窗口 tile 时不显示 App 名和 `1/3` 角标，通过最多两行窗口标题区分；其他屏幕聚合 App 可继续显示 `3窗` 这类数量角标。
 - 用 `hs.image.imageFromAppBundle(bundleID)` 获取图标。
 - 为每个图标块追加一个透明矩形作为 hitbox。
 - hitbox 设置 `trackMouseDown = true`、`trackMouseUp = true`、`trackMouseEnterExit = true` 和 `trackMouseMove = true`。
@@ -167,21 +168,10 @@ Cmd 释放：
 
 - `Esc` 调用 `cancelSwitcher()`。
 - `Return` 调用 `finishSwitcher()`。
-- `1-9` 映射到当前可见区域的第 1 到第 9 个候选项，命中后直接调用 `finishSwitcher()`。
-- 确认当前选中 App 时，如果它有多个同屏窗口，则自动进入窗口选择层。
+- `1-9` 映射到当前可见区域的第 1 到第 9 个候选项，命中后直接聚焦对应窗口。
 - `Cmd+Tab` 对应正向移动。
 - `Cmd+Shift+Tab` 对应反向移动。
 - 不要让 `Cmd+Tab` 默认跨屏遍历，否则会重新引入 macOS 原生切屏问题。
-
-第二层窗口选择：
-
-- 只对当前屏幕行里确认的多窗口 App 自动展开。
-- 展开后 `switcher.mode = "windows"`，释放 `Cmd` 不应自动确认。
-- 窗口层显示 App 图标、App 名称、窗口标题列表和操作提示。
-- 窗口层 `Tab` / `Shift+Tab` 或 `↑/↓` 在窗口间移动。
-- 窗口层 `Enter` 或鼠标点击确认聚焦窗口。
-- 窗口层 `Esc` 返回 App 选择层。
-- 不要做窗口内容缩略图，除非明确接受屏幕录制权限和性能成本。
 
 聚焦窗口：
 

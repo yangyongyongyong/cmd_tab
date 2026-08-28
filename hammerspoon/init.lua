@@ -185,6 +185,51 @@ local function truncateText(text, limit)
   return string.sub(text, 1, limit - 3) .. "..."
 end
 
+local function splitTextTwoLines(text, firstLimit, secondLimit)
+  text = text or ""
+
+  if utf8 and utf8.codes and utf8.char then
+    local firstParts = {}
+    local secondParts = {}
+    local overflow = false
+    local count = 0
+
+    for _, codepoint in utf8.codes(text) do
+      count = count + 1
+      if count <= firstLimit then
+        table.insert(firstParts, utf8.char(codepoint))
+      elseif count <= firstLimit + secondLimit - 1 then
+        table.insert(secondParts, utf8.char(codepoint))
+      else
+        overflow = true
+        break
+      end
+    end
+
+    local secondLine = table.concat(secondParts)
+    if overflow then
+      secondLine = secondLine .. "..."
+    end
+    if secondLine == "" then
+      secondLine = nil
+    end
+
+    return table.concat(firstParts), secondLine
+  end
+
+  if #text <= firstLimit then
+    return text, nil
+  end
+
+  local firstLine = string.sub(text, 1, firstLimit)
+  local secondLine = string.sub(text, firstLimit + 1)
+  if #secondLine > secondLimit then
+    secondLine = string.sub(secondLine, 1, math.max(0, secondLimit - 3)) .. "..."
+  end
+
+  return firstLine, secondLine
+end
+
 local function focusWindow(window)
   if not window then
     return
@@ -208,7 +253,7 @@ local function focusWindow(window)
   end
 end
 
-local function appCandidatesOnScreen(screen)
+local function appCandidatesOnScreen(screen, expandWindows)
   local targetScreenKey = screenKey(screen)
   local windowsByApp = {}
   local fallbackOrder = {}
@@ -237,15 +282,34 @@ local function appCandidatesOnScreen(screen)
       return
     end
 
-    local window = windows[1]
-    table.insert(result, {
-      window = window,
-      key = key,
-      name = appName(window),
-      icon = appIcon(window),
-      windows = windows,
-      windowCount = #windows,
-    })
+    if expandWindows and #windows > 1 then
+      for index, window in ipairs(windows) do
+        table.insert(result, {
+          window = window,
+          key = key,
+          appName = appName(window),
+          name = windowTitle(window),
+          icon = appIcon(window),
+          windows = { window },
+          windowCount = #windows,
+          windowIndex = index,
+          isWindowTile = true,
+        })
+      end
+    else
+      local window = windows[1]
+      table.insert(result, {
+        window = window,
+        key = key,
+        appName = appName(window),
+        name = appName(window),
+        icon = appIcon(window),
+        windows = windows,
+        windowCount = #windows,
+        windowIndex = 1,
+        isWindowTile = false,
+      })
+    end
     added[key] = true
   end
 
@@ -638,7 +702,7 @@ local function performAppAction(candidate, action)
 
   local window = candidate and candidate.window
   local app = window and window:application()
-  local name = candidate and candidate.name or app and app:name() or "App"
+  local name = candidate and candidate.appName or candidate and candidate.name or app and app:name() or "App"
 
   if action == "hide" and app then
     app:hide()
@@ -673,14 +737,15 @@ local function showAppActionMenu(candidate)
   local width = 220
   local rowHeight = 30
   local padding = 8
+  local appLabel = candidate.appName or candidate.name
   local items = {
-    { title = "隐藏 " .. candidate.name, action = "hide" },
+    { title = "隐藏 " .. appLabel, action = "hide" },
     { title = "关闭当前窗口", action = "close-window" },
-    { title = "退出 " .. candidate.name, action = "quit" },
+    { title = "退出 " .. appLabel, action = "quit" },
   }
 
   if optionCurrentlyDown() then
-    table.insert(items, { title = "强制退出 " .. candidate.name, action = "force-quit" })
+    table.insert(items, { title = "强制退出 " .. appLabel, action = "force-quit" })
   end
 
   table.insert(items, { title = "取消", action = "cancel" })
@@ -755,6 +820,42 @@ local function visibleRange(count, selected, maxVisible)
   return startIndex, startIndex + maxVisible - 1
 end
 
+local function drawCandidateLabel(canvas, candidate, frame, selected)
+  if candidate.isWindowTile then
+    local firstLine, secondLine = splitTextTwoLines(candidate.name, 15, 15)
+    local firstLineY = secondLine and frame.y or frame.y + 7
+    canvas:appendElements({
+      type = "text",
+      text = firstLine,
+      textSize = 9,
+      textColor = { red = 1, green = 1, blue = 1, alpha = selected and 1 or 0.82 },
+      textAlignment = "center",
+      frame = { x = frame.x, y = firstLineY, w = frame.w, h = 14 },
+    })
+
+    if secondLine then
+      canvas:appendElements({
+        type = "text",
+        text = secondLine,
+        textSize = 9,
+        textColor = { red = 1, green = 1, blue = 1, alpha = selected and 0.95 or 0.72 },
+        textAlignment = "center",
+        frame = { x = frame.x, y = frame.y + 13, w = frame.w, h = 14 },
+      })
+    end
+    return
+  end
+
+  canvas:appendElements({
+    type = "text",
+    text = truncateText(candidate.name, 12),
+    textSize = 11,
+    textColor = { red = 1, green = 1, blue = 1, alpha = selected and 1 or 0.78 },
+    textAlignment = "center",
+    frame = { x = frame.x, y = frame.y + 6, w = frame.w, h = 18 },
+  })
+end
+
 local finishSwitcher
 local finishCandidate
 local buildCandidates
@@ -791,7 +892,7 @@ local function buildScreenGroups(activeScreen, currentCandidates)
       return
     end
 
-    candidates = candidates or appCandidatesOnScreen(screen)
+    candidates = candidates or appCandidatesOnScreen(screen, isCurrent)
     if #candidates == 0 then
       return
     end
@@ -951,7 +1052,12 @@ drawSwitcherCanvas = function()
         frame = { x = itemX + 22, y = itemY + 10, w = 48, h = 48 },
       })
 
-      if candidate.windowCount and candidate.windowCount > 1 then
+      local badgeText = nil
+      if candidate.windowCount and candidate.windowCount > 1 and not candidate.isWindowTile then
+        badgeText = tostring(candidate.windowCount) .. "窗"
+      end
+
+      if badgeText then
         canvas:appendElements({
           type = "rectangle",
           action = "fill",
@@ -961,7 +1067,7 @@ drawSwitcherCanvas = function()
         })
         canvas:appendElements({
           type = "text",
-          text = tostring(candidate.windowCount) .. "窗",
+          text = badgeText,
           textSize = 9,
           textColor = { red = 1, green = 1, blue = 1, alpha = 0.95 },
           textAlignment = "center",
@@ -969,14 +1075,7 @@ drawSwitcherCanvas = function()
         })
       end
 
-      canvas:appendElements({
-        type = "text",
-        text = truncateText(candidate.name, 12),
-        textSize = 11,
-        textColor = { red = 1, green = 1, blue = 1, alpha = selected and 1 or 0.78 },
-        textAlignment = "center",
-        frame = { x = itemX + 4, y = itemY + 66, w = itemWidth - 8, h = 22 },
-      })
+      drawCandidateLabel(canvas, candidate, { x = itemX + 4, y = itemY + 60, w = itemWidth - 8, h = 28 }, selected)
 
       local digit = localIndex + 1
       if group.isCurrent and digit <= 9 then
@@ -1149,10 +1248,6 @@ local function enterWindowMode(candidate)
 end
 
 local function confirmAppCandidate(candidate)
-  if enterWindowMode(candidate) then
-    return
-  end
-
   finishCandidate(candidate)
 end
 
@@ -1392,7 +1487,7 @@ local function switchCurrentScreenApp(reverse)
   end
 
   recordWindowFocus(hs.window.focusedWindow())
-  local candidates = appCandidatesOnScreen(screen)
+  local candidates = appCandidatesOnScreen(screen, true)
   local groups = buildScreenGroups(screen, candidates)
   if #groups == 1 and #candidates == 1 then
     focusWindow(candidates[1].window)
@@ -1409,12 +1504,23 @@ local function switchCurrentScreenApp(reverse)
   switcher.screenGroups = groups
   switcher.commandSession = true
 
-  local focusedApp = appKey(hs.window.focusedWindow())
+  local focusedWindow = hs.window.focusedWindow()
+  local focusedWindowID = focusedWindow and focusedWindow:id()
+  local focusedApp = appKey(focusedWindow)
   local focusedIndex = 1
   for index, candidate in ipairs(switcher.candidates) do
-    if candidate.key == focusedApp then
+    if focusedWindowID and candidate.window and candidate.window:id() == focusedWindowID then
       focusedIndex = index
       break
+    end
+  end
+
+  if focusedIndex == 1 and focusedApp then
+    for index, candidate in ipairs(switcher.candidates) do
+      if candidate.key == focusedApp then
+        focusedIndex = index
+        break
+      end
     end
   end
 
@@ -1523,12 +1629,6 @@ switcher.eventTap = hs.eventtap.new({
       end
 
       return false
-    end
-
-    if keyCode == hs.keycodes.map.down or keyCode == hs.keycodes.map.space then
-      if enterWindowMode(selectedAppCandidate()) then
-        return true
-      end
     end
 
     if keyCode == hs.keycodes.map.m then
