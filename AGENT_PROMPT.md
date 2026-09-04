@@ -12,24 +12,26 @@ macOS 原生 `Cmd+Tab` 是全局 App MRU 列表。双屏或多屏时，用户在
 - `Cmd+Shift+Tab` 反向切换。
 - 当前屏幕默认指当前焦点窗口所在屏幕。
 - 可选项：允许改成鼠标所在屏幕。
-- 当前屏幕行中，多窗口 App 按窗口展开为多个候选项，单窗口 App 仍作为一个候选项。
+- 所有屏幕行中，多窗口 App 按窗口展开为多个候选项，单窗口 App 仍作为一个候选项。
 - 按住 `Cmd` 后，多次按 `Tab` 应能选择更老的 App，不能只在最近两个 App 之间来回跳。
 - 松开 `Cmd` 后聚焦选中的 App。
 - 显示类似原生切换器的悬浮图标面板。
 - 鼠标点击面板中的 App 图标时直接切换到该 App。
 - 鼠标悬停到面板中的 App 图标时先选中该 App。
 - 面板打开时按 `1-9`，直接切换到当前可见区域中对应编号的 App。
+- 面板打开时按 `I`，切换是否显示最小化窗口。
 - 每个屏幕应维护独立 App MRU，避免完全依赖 macOS 全局 App 顺序。
-- 悬浮面板应按屏幕分多行展示，第一行是当前屏幕，其他行分别对应其他屏幕。
+- 悬浮面板应按屏幕分多行展示；上下堆叠屏幕按 macOS 显示器排列从上到下显示，其他布局保持当前屏幕优先。
 - 普通 `Cmd+Tab` 键盘循环仍只在当前屏幕行内进行。
-- 鼠标点击其他屏幕行的 App 时，才允许跨屏聚焦。
-- 当前屏幕行如果 App 有多个窗口，应展开成多个窗口 tile，共用同一个 App 图标。
+- 鼠标点击其他屏幕行的 App 或窗口 tile 时，才允许跨屏聚焦。
+- 任意屏幕行如果 App 有多个窗口，应展开成多个窗口 tile，共用同一个 App 图标。
 - 多窗口 tile 不显示 App 名，只显示窗口标题，最多两行；两行放不下时才省略。
+- 默认不显示最小化窗口；开启“显示最小化窗口”后，最小化窗口也进入候选并显示“最小”角标。
 - 不再使用第二层窗口选择菜单；窗口切换应在第一层完成。
 - 右键 App 图标弹出管理菜单，不要右键直接退出。
 - 管理菜单提供隐藏 App、关闭当前窗口、退出 App、取消；按住 `Option` 右键时额外提供强制退出。
 - 通过切换器聚焦窗口后，默认把窗口铺满当前屏幕可用区域；不要使用 macOS 原生全屏。
-- 左键拖动 App 图标到其他屏幕行时，移动该 App 的代表窗口到目标屏幕。
+- 左键拖动 App 图标或窗口 tile 到其他屏幕行时，移动对应窗口到目标屏幕。
 - 拖动时显示跟随鼠标的半透明 App ghost，释放在原屏幕行或空白处应取消，不做切换。
 - `Esc` 取消，`Return` 确认。
 
@@ -93,13 +95,14 @@ macOS 原生 `Cmd+Tab` 是全局 App MRU 列表。双屏或多屏时，用户在
 候选窗口：
 
 - 使用 `hs.window.orderedWindows()` 获取 MRU 顺序。
-- 过滤 `window:isStandard()`、`window:isVisible()`、`not window:isMinimized()`。
+- 过滤 `window:isStandard()`；默认还要求 `window:isVisible()` 且 `not window:isMinimized()`。
+- 当 `cmdTab.showMinimizedWindows` 开启时，用 `hs.window.allWindows()` 补充最小化窗口；最小化窗口只要求有 `screen()`，不强制 `window:isStandard()`，以兼容 `AXDialog` 类 App 窗口。
 - 用 `window:screen()` 与当前屏幕匹配。
-- 其他屏幕行用 App 的 `bundleID` 去重，每个 App 只保留第一个窗口。
-- 当前屏幕行按窗口展开，一个 App 的多个窗口会变成多个 tile。
+- 所有屏幕行都用 App 的 `bundleID` 分组，并在 App 有多个窗口时展开为多个 tile。
+- 一个 App 的多个窗口会变成多个 tile；只有单窗口 App 保持为 App tile。
 - 候选顺序优先使用当前屏幕自己的 App MRU，再用 `hs.window.orderedWindows()` 补齐当前可见但还没有历史记录的 App。
-- 当前屏幕展开候选时，每个 tile 的 `candidate.window` 是具体窗口，`candidate.name` 使用窗口标题。
-- 其他屏幕聚合候选仍保存同 App、同屏幕的所有窗口：`candidate.windows` 和 `candidate.windowCount`。
+- 展开候选时，每个窗口 tile 的 `candidate.window` 是具体窗口，`candidate.name` 使用窗口标题。
+- 单窗口 App tile 或未展开候选仍保存同 App、同屏幕的所有窗口：`candidate.windows` 和 `candidate.windowCount`。
 
 每屏独立 MRU：
 
@@ -130,6 +133,7 @@ Cmd 释放：
 - 同时监听 `keyUp`，当 `F18/F19` 或 `Tab` 释放且 `Cmd` 已不在按下状态时，也调用 `finishSwitcher()`。
 - 不要给 `hs.hotkey.bind` 配置 repeat 回调，否则 Karabiner 虚拟键状态异常时可能出现自动循环选择停不下来。
 - 可以加一个只在 App 选择层生效的释放看门狗：如果 command 已释放且看到 switch key 释放，或距离最近 switch key 事件超过约 1 秒，则兜底完成选择。
+- 如果 `switcher.active=false` 但 `switcher.canvas`、`switcher.dragCanvas` 或 `switcher.dragState` 仍存在，watcher 应调用强制 dismiss 清理残留面板。
 
 对象生命周期：
 
@@ -142,17 +146,18 @@ Cmd 释放：
 
 - 使用 `hs.canvas`。
 - 面板放在当前屏幕中心。
-- 按屏幕分多行绘制，第一行标题是当前屏幕，其他行标题是其他屏幕。
+- 按屏幕分多行绘制；用 `screen:fullFrame()` 判断屏幕物理位置，上下堆叠时按 `y` 坐标从上到下排序，左右排列时保持当前屏幕优先。
 - 每个候选项显示 App icon；普通 App tile 显示 App 名，多窗口展开后的窗口 tile 显示窗口标题。
 - 只有当前屏幕行的可见候选项显示数字角标 `1-9`。
-- 当前屏幕展开窗口 tile 时不显示 App 名和 `1/3` 角标，通过最多两行窗口标题区分；其他屏幕聚合 App 可继续显示 `3窗` 这类数量角标。
+- 窗口 tile 不显示 App 名和 `1/3` 角标，通过最多两行窗口标题区分；未展开的聚合 App 可继续显示 `3窗` 这类数量角标。
+- 最小化窗口 tile 显示“最小”角标；点击或键盘确认时先 `window:unminimize()` 再聚焦。
 - 用 `hs.image.imageFromAppBundle(bundleID)` 获取图标。
 - 为每个图标块追加一个透明矩形作为 hitbox。
 - hitbox 设置 `trackMouseDown = true`、`trackMouseUp = true`、`trackMouseEnterExit = true` 和 `trackMouseMove = true`。
 - 在 `canvas:mouseCallback` 里根据 hitbox id 找到候选项。
 - 当前屏幕行的 `mouseEnter` 或 `mouseMove` 可以更新 `selectedIndex` 并重绘面板。
 - 其他屏幕行不要仅因悬停就改变最终选择，避免用户松开 `Cmd` 时意外跨屏。
-- 任意屏幕行的 `mouseUp` 都可以直接聚焦对应 App；点击其他屏幕行即跨屏切换。
+- 任意屏幕行的 `mouseUp` 都可以直接聚焦对应 App 或窗口 tile；点击其他屏幕行即跨屏切换。
 - `mouseDown` 时用 `hs.eventtap.checkMouseButtons()` 检测右键，并记录 hitbox id。
 - 右键 `mouseUp` 时弹出自绘 App 管理菜单；菜单出现后关闭 App 选择面板。
 - App 管理菜单使用 `hs.canvas`，并设置短时间自动消失，避免菜单残留。
@@ -166,9 +171,10 @@ Cmd 释放：
 
 键盘控制：
 
-- `Esc` 调用 `cancelSwitcher()`。
+- `Esc` 调用 `cancelSwitcher()`，并且要在 `switcher.active=false` 但 overlay 残留时也能强制清理。
 - `Return` 调用 `finishSwitcher()`。
 - `1-9` 映射到当前可见区域的第 1 到第 9 个候选项，命中后直接聚焦对应窗口。
+- `I` 切换 `cmdTab.showMinimizedWindows`，并立即重建当前面板候选列表。
 - `Cmd+Tab` 对应正向移动。
 - `Cmd+Shift+Tab` 对应反向移动。
 - 不要让 `Cmd+Tab` 默认跨屏遍历，否则会重新引入 macOS 原生切屏问题。
@@ -178,12 +184,14 @@ Cmd 释放：
 ```lua
 local app = window:application()
 if app then
-  app:activate(true)
+  app:activate(false)
 end
 window:raise()
 window:focus()
 window:setFrame(window:screen():frame(), 0)
 ```
+
+不要使用 `app:activate(true)`，否则 Chrome、IDE 这类多窗口 App 会在所有屏幕同时被抬到前台。只激活 App，再单独 `raise/focus` 目标窗口。
 
 使用 `screen:frame()` 而不是 `screen:fullFrame()`，这样不会遮住菜单栏和 Dock。
 

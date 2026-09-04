@@ -1,9 +1,15 @@
 local preferMouseScreen = false
 local maximizeWindowOnSwitchSettingKey = "cmdTab.maximizeWindowOnSwitch"
+local showMinimizedWindowsSettingKey = "cmdTab.showMinimizedWindows"
 local maximizeWindowOnSwitch = hs.settings.get(maximizeWindowOnSwitchSettingKey)
 if maximizeWindowOnSwitch == nil then
   maximizeWindowOnSwitch = true
   hs.settings.set(maximizeWindowOnSwitchSettingKey, maximizeWindowOnSwitch)
+end
+local showMinimizedWindows = hs.settings.get(showMinimizedWindowsSettingKey)
+if showMinimizedWindows == nil then
+  showMinimizedWindows = false
+  hs.settings.set(showMinimizedWindowsSettingKey, showMinimizedWindows)
 end
 
 pcall(function()
@@ -49,10 +55,54 @@ local function isUsableWindow(window)
     return false
   end
 
+  local minimized = window:isMinimized()
+  if showMinimizedWindows and minimized then
+    return window:screen() ~= nil
+  end
+
   return window:isStandard()
-    and window:isVisible()
-    and not window:isMinimized()
     and window:screen() ~= nil
+    and window:isVisible()
+end
+
+local function windowIdentity(window)
+  if not window then
+    return nil
+  end
+
+  local ok, id = pcall(function()
+    return window:id()
+  end)
+  if ok and id then
+    return id
+  end
+
+  return tostring(window)
+end
+
+local function candidateWindows()
+  local result = {}
+  local seen = {}
+
+  local function addWindow(window)
+    local id = windowIdentity(window)
+    if id and not seen[id] then
+      seen[id] = true
+      table.insert(result, window)
+    end
+  end
+
+  for _, window in ipairs(hs.window.orderedWindows()) do
+    addWindow(window)
+  end
+
+  if showMinimizedWindows then
+    for _, window in ipairs(hs.window.allWindows()) do
+      addWindow(window)
+    end
+  end
+
+  return result
 end
 
 local function currentScreen()
@@ -78,7 +128,7 @@ local function appWindowsOnScreen(screen)
   local fallbackOrder = {}
   local seenApps = {}
 
-  for _, window in ipairs(hs.window.orderedWindows()) do
+  for _, window in ipairs(candidateWindows()) do
     if isUsableWindow(window) and screenKey(window:screen()) == targetScreenKey then
       local key = appKey(window)
       if key and not seenApps[key] then
@@ -114,7 +164,7 @@ local function appWindowsForKeyOnScreen(screen, key)
   local targetScreenKey = screenKey(screen)
   local result = {}
 
-  for _, window in ipairs(hs.window.orderedWindows()) do
+  for _, window in ipairs(candidateWindows()) do
     if isUsableWindow(window) and screenKey(window:screen()) == targetScreenKey and appKey(window) == key then
       table.insert(result, window)
     end
@@ -236,8 +286,14 @@ local function focusWindow(window)
   end
 
   local app = window:application()
+  if window:isMinimized() then
+    pcall(function()
+      window:unminimize()
+    end)
+  end
+
   if app then
-    app:activate(true)
+    app:activate(false)
   end
 
   window:raise()
@@ -259,7 +315,7 @@ local function appCandidatesOnScreen(screen, expandWindows)
   local fallbackOrder = {}
   local result = {}
 
-  for _, window in ipairs(hs.window.orderedWindows()) do
+  for _, window in ipairs(candidateWindows()) do
     if isUsableWindow(window) and screenKey(window:screen()) == targetScreenKey then
       local key = appKey(window)
       if key then
@@ -293,6 +349,7 @@ local function appCandidatesOnScreen(screen, expandWindows)
           windows = { window },
           windowCount = #windows,
           windowIndex = index,
+          isMinimized = window:isMinimized(),
           isWindowTile = true,
         })
       end
@@ -307,6 +364,7 @@ local function appCandidatesOnScreen(screen, expandWindows)
         windows = windows,
         windowCount = #windows,
         windowIndex = 1,
+        isMinimized = window:isMinimized(),
         isWindowTile = false,
       })
     end
@@ -387,7 +445,7 @@ switcher.screenMRU = switcher.screenMRU or {}
 switcher.hotkeys = {}
 switcher.iconCache = appIconCache
 switcher.iconWarmupTimer = hs.timer.doAfter(0.2, function()
-  for _, window in ipairs(hs.window.orderedWindows()) do
+  for _, window in ipairs(candidateWindows()) do
     if isUsableWindow(window) then
       appIcon(window)
     end
@@ -410,13 +468,35 @@ local function nowSeconds()
   return hs.timer.secondsSinceEpoch()
 end
 
+local function modifiersIncludeCommand(modifiers)
+  if modifiers and type(modifiers._raw) == "number" then
+    return math.floor(modifiers._raw / 1048576) % 2 == 1
+  end
+
+  return modifiers and (modifiers.cmd or modifiers.command or modifiers.leftcmd or modifiers.rightcmd)
+end
+
 local function commandCurrentlyDown()
-  local ok, modifiers = pcall(hs.eventtap.checkKeyboardModifiers)
+  local ok, modifiers = pcall(hs.eventtap.checkKeyboardModifiers, true)
+  if ok and modifiers then
+    return modifiersIncludeCommand(modifiers)
+  end
+
+  ok, modifiers = pcall(hs.eventtap.checkKeyboardModifiers)
   if not ok or not modifiers then
     return false
   end
 
-  return modifiers.cmd or modifiers.command or modifiers.leftcmd or modifiers.rightcmd
+  return modifiersIncludeCommand(modifiers)
+end
+
+local function anyMouseButtonDown()
+  local ok, buttons = pcall(hs.eventtap.checkMouseButtons)
+  if not ok or not buttons then
+    return false
+  end
+
+  return buttons.left or buttons.right or buttons.middle or buttons[1] or buttons[2] or buttons[3]
 end
 
 local function isSwitchKeyCode(keyCode)
@@ -458,6 +538,10 @@ recordWindowFocus(hs.window.focusedWindow())
 
 local drawSwitcherCanvas
 local drawWindowCanvas
+local finishSwitcher
+local finishCandidate
+local buildCandidates
+local buildScreenGroups
 
 local function hideSwitcherCanvas()
   if switcher.canvas then
@@ -485,6 +569,21 @@ local function hideDragGhost()
     switcher.dragCanvas:delete()
     switcher.dragCanvas = nil
   end
+end
+
+local function switcherOverlayVisible()
+  return switcher.canvas ~= nil or switcher.dragCanvas ~= nil or switcher.menuCanvas ~= nil
+end
+
+local function dismissSwitcherOverlay()
+  switcher.active = false
+  switcher.commandSession = false
+  switcher.switchKeyReleased = false
+  switcher.rightClickTarget = nil
+  switcher.dragState = nil
+  hideSwitcherCanvas()
+  hideAppActionMenu()
+  hideDragGhost()
 end
 
 local function updateDragGhost(point)
@@ -578,13 +677,19 @@ local function moveCandidateToScreen(candidate, targetScreen)
   end
 
   local targetFrame = mapFrameToScreen(window, targetScreen)
+  if window:isMinimized() then
+    pcall(function()
+      window:unminimize()
+    end)
+  end
+
   pcall(function()
     window:setFrame(targetFrame, 0)
   end)
 
   local app = window:application()
   if app then
-    app:activate(true)
+    app:activate(false)
   end
   window:raise()
   window:focus()
@@ -663,6 +768,10 @@ local function finishAppDrag()
   end
 
   local wasDragging = drag.dragging
+  local point = hs.mouse.absolutePosition()
+  local wasClick = not wasDragging and drag.tileFrame and pointInFrame(point, drag.tileFrame)
+  local clickCandidate = drag.candidate
+
   if wasDragging and drag.targetScreen and drag.targetScreenKey ~= drag.sourceScreenKey then
     switcher.active = false
     switcher.commandSession = false
@@ -673,6 +782,11 @@ local function finishAppDrag()
   end
 
   resetDragState()
+  if wasClick then
+    finishCandidate(clickCandidate)
+    return true
+  end
+
   if wasDragging then
     switcher.commandSession = true
     switcher.switchKeyReleased = false
@@ -856,10 +970,6 @@ local function drawCandidateLabel(canvas, candidate, frame, selected)
   })
 end
 
-local finishSwitcher
-local finishCandidate
-local buildCandidates
-
 local function setMaximizeWindowOnSwitch(enabled)
   maximizeWindowOnSwitch = enabled and true or false
   hs.settings.set(maximizeWindowOnSwitchSettingKey, maximizeWindowOnSwitch)
@@ -874,6 +984,34 @@ local function toggleMaximizeWindowOnSwitch()
   end
 end
 
+local function setShowMinimizedWindows(enabled)
+  showMinimizedWindows = enabled and true or false
+  hs.settings.set(showMinimizedWindowsSettingKey, showMinimizedWindows)
+end
+
+local function refreshSwitcherCandidates()
+  if not switcher.active or switcher.mode ~= "apps" or not switcher.screen or not buildScreenGroups then
+    return
+  end
+
+  local candidates = appCandidatesOnScreen(switcher.screen, true)
+  if #candidates == 0 then
+    dismissSwitcherOverlay()
+    return
+  end
+
+  switcher.candidates = candidates
+  switcher.screenGroups = buildScreenGroups(switcher.screen, candidates)
+  switcher.selectedIndex = math.min(math.max(1, switcher.selectedIndex or 1), #candidates)
+  drawSwitcherCanvas()
+end
+
+local function toggleShowMinimizedWindows()
+  setShowMinimizedWindows(not showMinimizedWindows)
+  hs.alert.show(showMinimizedWindows and "显示最小化窗口已开启" or "显示最小化窗口已关闭")
+  refreshSwitcherCandidates()
+end
+
 local function screenTitle(screen, isCurrent)
   local name = screen and screen:name() or "未知屏幕"
   if isCurrent then
@@ -883,7 +1021,63 @@ local function screenTitle(screen, isCurrent)
   return "其他屏幕 · " .. name
 end
 
-local function buildScreenGroups(activeScreen, currentCandidates)
+local function screenLayoutFrame(screen)
+  if not screen then
+    return { x = 0, y = 0, w = 0, h = 0 }
+  end
+
+  local ok, frame = pcall(function()
+    return screen:fullFrame()
+  end)
+  if ok and frame then
+    return frame
+  end
+
+  return screen:frame()
+end
+
+local function axisOverlap(startA, sizeA, startB, sizeB)
+  return math.max(0, math.min(startA + sizeA, startB + sizeB) - math.max(startA, startB))
+end
+
+local function screensAreVerticallyStacked(screens)
+  if #screens < 2 then
+    return false
+  end
+
+  local verticalPairs = 0
+  local horizontalPairs = 0
+  for i = 1, #screens - 1 do
+    for j = i + 1, #screens do
+      local a = screenLayoutFrame(screens[i])
+      local b = screenLayoutFrame(screens[j])
+      local xOverlap = axisOverlap(a.x, a.w, b.x, b.w)
+      local yOverlap = axisOverlap(a.y, a.h, b.y, b.h)
+      local xOverlapRatio = xOverlap / math.max(1, math.min(a.w, b.w))
+      local yOverlapRatio = yOverlap / math.max(1, math.min(a.h, b.h))
+
+      if xOverlapRatio > 0.25 and yOverlapRatio <= 0.25 then
+        verticalPairs = verticalPairs + 1
+      elseif yOverlapRatio > 0.25 and xOverlapRatio <= 0.25 then
+        horizontalPairs = horizontalPairs + 1
+      end
+    end
+  end
+
+  return verticalPairs > 0 and horizontalPairs == 0
+end
+
+local function screenPositionLessThan(a, b)
+  local frameA = screenLayoutFrame(a)
+  local frameB = screenLayoutFrame(b)
+  if math.abs(frameA.y - frameB.y) > 8 then
+    return frameA.y < frameB.y
+  end
+
+  return frameA.x < frameB.x
+end
+
+buildScreenGroups = function(activeScreen, currentCandidates)
   local groups = {}
   local activeScreenKey = screenKey(activeScreen)
 
@@ -892,7 +1086,7 @@ local function buildScreenGroups(activeScreen, currentCandidates)
       return
     end
 
-    candidates = candidates or appCandidatesOnScreen(screen, isCurrent)
+    candidates = candidates or appCandidatesOnScreen(screen, true)
     if #candidates == 0 then
       return
     end
@@ -908,11 +1102,25 @@ local function buildScreenGroups(activeScreen, currentCandidates)
     })
   end
 
-  addGroup(activeScreen, true, currentCandidates)
+  local screens = hs.screen.allScreens()
+  if screensAreVerticallyStacked(screens) then
+    table.sort(screens, screenPositionLessThan)
+    local addedActiveScreen = false
+    for _, screen in ipairs(screens) do
+      local isCurrent = screenKey(screen) == activeScreenKey
+      addGroup(screen, isCurrent, isCurrent and currentCandidates or nil)
+      addedActiveScreen = addedActiveScreen or isCurrent
+    end
+    if not addedActiveScreen then
+      addGroup(activeScreen, true, currentCandidates)
+    end
+  else
+    addGroup(activeScreen, true, currentCandidates)
 
-  for _, screen in ipairs(hs.screen.allScreens()) do
-    if screenKey(screen) ~= activeScreenKey then
-      addGroup(screen, false)
+    for _, screen in ipairs(screens) do
+      if screenKey(screen) ~= activeScreenKey then
+        addGroup(screen, false)
+      end
     end
   end
 
@@ -932,7 +1140,7 @@ drawSwitcherCanvas = function()
   local itemWidth = 92
   local panelPadding = 22
   local rowHeight = 126
-  local footerHeight = 30
+  local footerHeight = 54
   local maxVisible = math.max(1, math.floor((frame.w - 120) / itemWidth))
   local groups = switcher.screenGroups
   if not groups or #groups == 0 then
@@ -1053,7 +1261,11 @@ drawSwitcherCanvas = function()
       })
 
       local badgeText = nil
-      if candidate.windowCount and candidate.windowCount > 1 and not candidate.isWindowTile then
+      local badgeFillColor = { red = 0.95, green = 0.42, blue = 0.12, alpha = selected and 1 or 0.86 }
+      if candidate.isMinimized then
+        badgeText = "最小"
+        badgeFillColor = { red = 0.36, green = 0.42, blue = 0.52, alpha = selected and 1 or 0.86 }
+      elseif candidate.windowCount and candidate.windowCount > 1 and not candidate.isWindowTile then
         badgeText = tostring(candidate.windowCount) .. "窗"
       end
 
@@ -1062,7 +1274,7 @@ drawSwitcherCanvas = function()
           type = "rectangle",
           action = "fill",
           roundedRectRadii = { xRadius = 7, yRadius = 7 },
-          fillColor = { red = 0.95, green = 0.42, blue = 0.12, alpha = selected and 1 or 0.86 },
+          fillColor = badgeFillColor,
           frame = { x = itemX + 52, y = itemY + 7, w = 28, h = 17 },
         })
         canvas:appendElements({
@@ -1121,44 +1333,47 @@ drawSwitcherCanvas = function()
     end
   end
 
-  local toggleID = "toggle-maximize-window-on-switch"
-  local toggleY = panelHeight - panelPadding - 20
-  switcher.clickTargets[toggleID] = { mode = "toggle-maximize" }
-  canvas:appendElements({
-    id = toggleID .. "-box",
-    type = "rectangle",
-    action = "stroke",
-    roundedRectRadii = { xRadius = 4, yRadius = 4 },
-    strokeColor = { red = 1, green = 1, blue = 1, alpha = 0.55 },
-    strokeWidth = 1.4,
-    frame = { x = panelPadding + 8, y = toggleY + 2, w = 16, h = 16 },
-  })
-  if maximizeWindowOnSwitch then
+  local function drawFooterToggle(id, mode, y, checked, label)
+    switcher.clickTargets[id] = { mode = mode }
+    canvas:appendElements({
+      id = id .. "-box",
+      type = "rectangle",
+      action = "stroke",
+      roundedRectRadii = { xRadius = 4, yRadius = 4 },
+      strokeColor = { red = 1, green = 1, blue = 1, alpha = 0.55 },
+      strokeWidth = 1.4,
+      frame = { x = panelPadding + 8, y = y + 2, w = 16, h = 16 },
+    })
+    if checked then
+      canvas:appendElements({
+        type = "text",
+        text = "✓",
+        textSize = 14,
+        textColor = { red = 1, green = 1, blue = 1, alpha = 0.9 },
+        textAlignment = "center",
+        frame = { x = panelPadding + 8, y = y, w = 16, h = 18 },
+      })
+    end
     canvas:appendElements({
       type = "text",
-      text = "✓",
-      textSize = 14,
-      textColor = { red = 1, green = 1, blue = 1, alpha = 0.9 },
-      textAlignment = "center",
-      frame = { x = panelPadding + 8, y = toggleY, w = 16, h = 18 },
+      text = label,
+      textSize = 11,
+      textColor = { red = 1, green = 1, blue = 1, alpha = 0.58 },
+      textAlignment = "left",
+      frame = { x = panelPadding + 32, y = y + 1, w = panelWidth - panelPadding * 2 - 40, h = 18 },
+    })
+    canvas:appendElements({
+      id = id,
+      type = "rectangle",
+      action = "fill",
+      fillColor = { red = 1, green = 1, blue = 1, alpha = 0.01 },
+      frame = { x = panelPadding + 4, y = y - 3, w = panelWidth - panelPadding * 2, h = 24 },
+      trackMouseUp = true,
     })
   end
-  canvas:appendElements({
-    type = "text",
-    text = "自动铺满可用区域    M 切换",
-    textSize = 11,
-    textColor = { red = 1, green = 1, blue = 1, alpha = 0.58 },
-    textAlignment = "left",
-    frame = { x = panelPadding + 32, y = toggleY + 1, w = panelWidth - panelPadding * 2 - 40, h = 18 },
-  })
-  canvas:appendElements({
-    id = toggleID,
-    type = "rectangle",
-    action = "fill",
-    fillColor = { red = 1, green = 1, blue = 1, alpha = 0.01 },
-    frame = { x = panelPadding + 4, y = toggleY - 3, w = panelWidth - panelPadding * 2, h = 26 },
-    trackMouseUp = true,
-  })
+
+  drawFooterToggle("toggle-maximize-window-on-switch", "toggle-maximize", panelHeight - panelPadding - 44, maximizeWindowOnSwitch, "自动铺满可用区域    M 切换")
+  drawFooterToggle("toggle-show-minimized-windows", "toggle-minimized", panelHeight - panelPadding - 21, showMinimizedWindows, "显示最小化窗口    I 切换")
 
   switcher.canvas = canvas
   canvas:mouseCallback(function(_, message, id)
@@ -1169,8 +1384,14 @@ drawSwitcherCanvas = function()
         return
       end
 
-      if message == "mouseUp" and finishAppDrag() then
-        return
+      if message == "mouseUp" and switcher.dragState then
+        if finishAppDrag() then
+          return
+        end
+        if switcher.active and not commandCurrentlyDown() then
+          finishSwitcher()
+          return
+        end
       end
 
       return
@@ -1179,6 +1400,13 @@ drawSwitcherCanvas = function()
     if target.mode == "toggle-maximize" then
       if message == "mouseUp" then
         toggleMaximizeWindowOnSwitch()
+      end
+      return
+    end
+
+    if target.mode == "toggle-minimized" then
+      if message == "mouseUp" then
+        toggleShowMinimizedWindows()
       end
       return
     end
@@ -1391,12 +1619,7 @@ drawWindowCanvas = function()
 end
 
 finishCandidate = function(candidate)
-  switcher.active = false
-  switcher.commandSession = false
-  switcher.switchKeyReleased = false
-  hideSwitcherCanvas()
-  hideAppActionMenu()
-  hideDragGhost()
+  dismissSwitcherOverlay()
 
   if candidate and candidate.window then
     focusWindow(candidate.window)
@@ -1413,16 +1636,11 @@ finishSwitcher = function()
 end
 
 local function cancelSwitcher()
-  if not switcher.active then
+  if not switcher.active and not switcherOverlayVisible() then
     return
   end
 
-  switcher.active = false
-  switcher.commandSession = false
-  switcher.switchKeyReleased = false
-  hideSwitcherCanvas()
-  hideAppActionMenu()
-  hideDragGhost()
+  dismissSwitcherOverlay()
 end
 
 buildCandidates = function(windows)
@@ -1545,11 +1763,18 @@ switcher.eventTap = hs.eventtap.new({
   hs.eventtap.event.types.leftMouseDragged,
   hs.eventtap.event.types.leftMouseUp,
 }, function(event)
+  local eventType = event:getType()
+  if eventType == hs.eventtap.event.types.keyDown and event:getKeyCode() == hs.keycodes.map.escape then
+    if switcher.active or switcherOverlayVisible() then
+      cancelSwitcher()
+      return true
+    end
+  end
+
   if not switcher.active then
     return false
   end
 
-  local eventType = event:getType()
   if eventType == hs.eventtap.event.types.leftMouseDragged then
     if switcher.dragState and updateAppDrag() then
       return false
@@ -1589,16 +1814,6 @@ switcher.eventTap = hs.eventtap.new({
 
   if eventType == hs.eventtap.event.types.keyDown then
     local keyCode = event:getKeyCode()
-    if keyCode == hs.keycodes.map.escape then
-      if switcher.mode == "windows" then
-        drawSwitcherCanvas()
-        return true
-      end
-
-      cancelSwitcher()
-      return true
-    end
-
     if switcher.mode == "windows" then
       if keyCode == hs.keycodes.map.down or keyCode == hs.keycodes.map.up then
         switcher.selectedWindowIndex = nextIndex(switcher.selectedWindowIndex, #switcher.windowCandidates, keyCode == hs.keycodes.map.up)
@@ -1636,6 +1851,11 @@ switcher.eventTap = hs.eventtap.new({
       return true
     end
 
+    if keyCode == hs.keycodes.map.i then
+      toggleShowMinimizedWindows()
+      return true
+    end
+
     local digit = digitForEvent(event)
     if digit then
       local index = (switcher.visibleStartIndex or 1) + digit - 1
@@ -1657,20 +1877,36 @@ end)
 switcher.eventTap:start()
 
 switcher.releaseWatcher = hs.timer.doEvery(0.12, function()
-  if switcher.dragState and switcher.dragState.dragging then
-    local buttons = hs.eventtap.checkMouseButtons()
-    if not buttons.left and not buttons[1] then
-      finishAppDrag()
+  if switcher.eventTap and not switcher.eventTap:isEnabled() then
+    switcher.eventTap:start()
+  end
+
+  local mouseDown = anyMouseButtonDown()
+  if switcher.dragState and not mouseDown then
+    if finishAppDrag() then
       return
     end
   end
 
-  if not switcher.active or switcher.mode ~= "apps" or not switcher.commandSession then
+  if not switcher.active then
+    if switcher.canvas or switcher.dragCanvas or switcher.dragState then
+      dismissSwitcherOverlay()
+    end
+    return
+  end
+
+  if not switcher.active or switcher.mode ~= "apps" or mouseDown then
     return
   end
 
   local elapsed = nowSeconds() - (switcher.lastSwitchEventAt or 0)
-  if not commandCurrentlyDown() and (switcher.switchKeyReleased or elapsed > 1.0) then
+  local commandDown = commandCurrentlyDown()
+  if not commandDown and not switcher.commandSession and not switcher.switchKeyReleased and elapsed > 0.5 then
+    dismissSwitcherOverlay()
+    return
+  end
+
+  if not commandDown and (switcher.commandSession or switcher.switchKeyReleased or elapsed > 0.2) then
     finishSwitcher()
   end
 end)
@@ -1681,7 +1917,11 @@ function currentScreenSwitcherStatus()
     mode = switcher.mode,
     candidates = #switcher.candidates,
     selectedIndex = switcher.selectedIndex,
+    overlayVisible = switcherOverlayVisible(),
+    verticalScreenLayout = screensAreVerticallyStacked(hs.screen.allScreens()),
+    commandDown = commandCurrentlyDown(),
     maximizeWindowOnSwitch = maximizeWindowOnSwitch,
+    showMinimizedWindows = showMinimizedWindows,
     windowCandidates = #switcher.windowCandidates,
     selectedWindowIndex = switcher.selectedWindowIndex,
     visibleStartIndex = switcher.visibleStartIndex,
