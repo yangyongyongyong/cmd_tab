@@ -7,6 +7,8 @@
 ## 当前行为
 
 - `Cmd+Tab`：打开当前屏幕 App 切换器，并选中下一个 App。
+- 快速按下并释放 `Cmd+Tab`：直接切换，不绘制悬浮面板。
+- 按住 `Cmd` 超过约 `0.3s`：才显示悬浮面板。
 - 按住 `Cmd` 连续按 `Tab`：继续向更老的 App 移动。
 - `Cmd+Shift+Tab`：反向移动。
 - 松开 `Cmd`：切到当前选中的 App。
@@ -68,8 +70,11 @@ cmd_tab/
 - Karabiner 把 `Cmd+Shift+Tab` 转成 `Cmd+Shift+F19`。
 - Hammerspoon 监听 `F18/F19`，枚举各屏幕的标准可见窗口并按屏幕分组。
 - 所有屏幕行都会按窗口展开多窗口 App，单窗口 App 仍以 App tile 展示。
+- 展开后的窗口 tile 按每屏独立窗口 MRU 排序，不再把同 App 的多个窗口强行连续排在一起，保证最近两个不同 App/窗口能正常互相切换。
 - Hammerspoon 监听窗口聚焦事件，为每个屏幕维护独立 App MRU 顺序。
+- Hammerspoon 同时维护每个屏幕的窗口 MRU 顺序，避免 macOS 或 IDE 把同 App 多个窗口整体抬高后打乱 `Cmd+Tab` 的最近切换语义。
 - 第一次触发时冻结候选列表，避免系统 MRU 重排导致只能在最近两个 App 之间来回跳。
+- 悬浮面板延迟 `0.3s` 绘制，秒切时只更新候选和选中项，不创建 `hs.canvas`，减少体感卡顿。
 - Hammerspoon 使用 `flagsChanged` 监听 `Cmd` 释放，不使用定时器轮询。
 - `eventtap` 和 `hotkey` 对象挂在全局表上，避免被 Lua GC 回收。
 - F18/F19 热键不绑定 repeat 回调，避免 Karabiner 虚拟键状态异常时自动循环选择。

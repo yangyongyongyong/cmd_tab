@@ -1,4 +1,5 @@
 local preferMouseScreen = false
+local switcherDisplayDelay = 0.3
 local maximizeWindowOnSwitchSettingKey = "cmdTab.maximizeWindowOnSwitch"
 local showMinimizedWindowsSettingKey = "cmdTab.showMinimizedWindows"
 local maximizeWindowOnSwitch = hs.settings.get(maximizeWindowOnSwitchSettingKey)
@@ -313,6 +314,8 @@ local function appCandidatesOnScreen(screen, expandWindows)
   local targetScreenKey = screenKey(screen)
   local windowsByApp = {}
   local fallbackOrder = {}
+  local orderedWindowsOnScreen = {}
+  local windowByID = {}
   local result = {}
 
   for _, window in ipairs(candidateWindows()) do
@@ -324,8 +327,75 @@ local function appCandidatesOnScreen(screen, expandWindows)
           table.insert(fallbackOrder, key)
         end
         table.insert(windowsByApp[key], window)
+        table.insert(orderedWindowsOnScreen, window)
+        windowByID[windowIdentity(window)] = window
       end
     end
+  end
+
+  if expandWindows then
+    local addedSingleWindowApp = {}
+    local addedWindow = {}
+    local windowIndexByID = {}
+    for _, windows in pairs(windowsByApp) do
+      for index, window in ipairs(windows) do
+        windowIndexByID[windowIdentity(window)] = index
+      end
+    end
+
+    local function addWindowCandidate(window)
+      local windowID = windowIdentity(window)
+      if not windowID or addedWindow[windowID] then
+        return
+      end
+
+      local key = appKey(window)
+      local windows = key and windowsByApp[key] or nil
+      if windows then
+        if #windows > 1 then
+          addedWindow[windowID] = true
+          table.insert(result, {
+            window = window,
+            key = key,
+            appName = appName(window),
+            name = windowTitle(window),
+            icon = appIcon(window),
+            windows = { window },
+            windowCount = #windows,
+            windowIndex = windowIndexByID[windowIdentity(window)] or 1,
+            isMinimized = window:isMinimized(),
+            isWindowTile = true,
+          })
+        elseif not addedSingleWindowApp[key] then
+          addedWindow[windowID] = true
+          addedSingleWindowApp[key] = true
+          table.insert(result, {
+            window = window,
+            key = key,
+            appName = appName(window),
+            name = appName(window),
+            icon = appIcon(window),
+            windows = windows,
+            windowCount = #windows,
+            windowIndex = 1,
+            isMinimized = window:isMinimized(),
+            isWindowTile = false,
+          })
+        end
+      end
+    end
+
+    local state = currentScreenSwitcher
+    local screenWindowMRU = state and state.screenWindowMRU and state.screenWindowMRU[targetScreenKey] or {}
+    for _, windowID in ipairs(screenWindowMRU) do
+      addWindowCandidate(windowByID[windowID])
+    end
+
+    for _, window in ipairs(orderedWindowsOnScreen) do
+      addWindowCandidate(window)
+    end
+
+    return result
   end
 
   local state = currentScreenSwitcher
@@ -397,11 +467,17 @@ end
 if switcher.eventTap then
   switcher.eventTap:stop()
 end
+if switcher.mouseDragTap then
+  switcher.mouseDragTap:stop()
+end
 if switcher.releaseWatcher then
   switcher.releaseWatcher:stop()
 end
 if switcher.iconWarmupTimer then
   switcher.iconWarmupTimer:stop()
+end
+if switcher.displayTimer then
+  switcher.displayTimer:stop()
 end
 if switcher.hotkeys then
   for _, hotkey in ipairs(switcher.hotkeys) do
@@ -419,7 +495,9 @@ switcher.canvas = nil
 switcher.menuCanvas = nil
 switcher.menuTargets = {}
 switcher.menuTimer = nil
+switcher.displayTimer = nil
 switcher.dragCanvas = nil
+switcher.mouseDragTap = nil
 switcher.candidates = {}
 switcher.screenGroups = {}
 switcher.selectedIndex = 1
@@ -440,6 +518,7 @@ switcher.dragState = nil
 switcher.visibleStartIndex = 1
 switcher.visibleEndIndex = 0
 switcher.screenMRU = switcher.screenMRU or {}
+switcher.screenWindowMRU = switcher.screenWindowMRU or {}
 
 -- 这些对象必须挂到全局表上，避免 Hammerspoon 重新加载后被 Lua GC 回收。
 switcher.hotkeys = {}
@@ -520,6 +599,18 @@ local function recordWindowFocus(window)
     return
   end
 
+  local windowID = windowIdentity(window)
+  if windowID then
+    local oldWindowMRU = switcher.screenWindowMRU[targetScreenKey] or {}
+    local newWindowMRU = { windowID }
+    for _, existingID in ipairs(oldWindowMRU) do
+      if existingID ~= windowID then
+        table.insert(newWindowMRU, existingID)
+      end
+    end
+    switcher.screenWindowMRU[targetScreenKey] = newWindowMRU
+  end
+
   local oldMRU = switcher.screenMRU[targetScreenKey] or {}
   local newMRU = { key }
   for _, existingKey in ipairs(oldMRU) do
@@ -542,8 +633,24 @@ local finishSwitcher
 local finishCandidate
 local buildCandidates
 local buildScreenGroups
+local startSwitcherMouseDragTap
+
+local function stopSwitcherMouseDragTap()
+  if switcher.mouseDragTap then
+    switcher.mouseDragTap:stop()
+    switcher.mouseDragTap = nil
+  end
+end
+
+local function cancelDelayedSwitcherCanvas()
+  if switcher.displayTimer then
+    switcher.displayTimer:stop()
+    switcher.displayTimer = nil
+  end
+end
 
 local function hideSwitcherCanvas()
+  cancelDelayedSwitcherCanvas()
   if switcher.canvas then
     switcher.canvas:delete()
     switcher.canvas = nil
@@ -576,6 +683,7 @@ local function switcherOverlayVisible()
 end
 
 local function dismissSwitcherOverlay()
+  stopSwitcherMouseDragTap()
   switcher.active = false
   switcher.commandSession = false
   switcher.switchKeyReleased = false
@@ -584,6 +692,28 @@ local function dismissSwitcherOverlay()
   hideSwitcherCanvas()
   hideAppActionMenu()
   hideDragGhost()
+end
+
+local function requestSwitcherCanvasUpdate(immediate)
+  if not switcher.active or switcher.mode ~= "apps" then
+    return
+  end
+
+  if immediate or switcher.canvas then
+    drawSwitcherCanvas()
+    return
+  end
+
+  if switcher.displayTimer then
+    return
+  end
+
+  switcher.displayTimer = hs.timer.doAfter(switcherDisplayDelay, function()
+    switcher.displayTimer = nil
+    if switcher.active and switcher.mode == "apps" and not switcher.canvas and not switcher.dragState and commandCurrentlyDown() then
+      drawSwitcherCanvas()
+    end
+  end)
 end
 
 local function updateDragGhost(point)
@@ -698,6 +828,7 @@ local function moveCandidateToScreen(candidate, targetScreen)
 end
 
 local function resetDragState()
+  stopSwitcherMouseDragTap()
   hideDragGhost()
   switcher.dragState = nil
 end
@@ -722,6 +853,9 @@ local function beginAppDrag(target)
     targetScreen = nil,
     targetScreenKey = nil,
   }
+  if startSwitcherMouseDragTap then
+    startSwitcherMouseDragTap()
+  end
 end
 
 local function updateAppDrag()
@@ -797,6 +931,39 @@ local function finishAppDrag()
 
   switcher.commandSession = true
   return false
+end
+
+startSwitcherMouseDragTap = function()
+  if switcher.mouseDragTap and switcher.mouseDragTap:isEnabled() then
+    return
+  end
+
+  stopSwitcherMouseDragTap()
+  switcher.mouseDragTap = hs.eventtap.new({
+    hs.eventtap.event.types.leftMouseDragged,
+    hs.eventtap.event.types.leftMouseUp,
+  }, function(event)
+    if not switcher.dragState then
+      stopSwitcherMouseDragTap()
+      return false
+    end
+
+    local eventType = event:getType()
+    if eventType == hs.eventtap.event.types.leftMouseDragged then
+      updateAppDrag()
+      return false
+    end
+
+    if eventType == hs.eventtap.event.types.leftMouseUp then
+      if finishAppDrag() then
+        return true
+      end
+      return false
+    end
+
+    return false
+  end)
+  switcher.mouseDragTap:start()
 end
 
 local function optionCurrentlyDown()
@@ -1695,7 +1862,7 @@ local function switchCurrentScreenApp(reverse)
     end
 
     switcher.selectedIndex = nextIndex(switcher.selectedIndex, #switcher.candidates, reverse)
-    drawSwitcherCanvas()
+    requestSwitcherCanvasUpdate(false)
     return
   end
 
@@ -1743,7 +1910,7 @@ local function switchCurrentScreenApp(reverse)
   end
 
   switcher.selectedIndex = nextIndex(focusedIndex, #switcher.candidates, reverse)
-  drawSwitcherCanvas()
+  requestSwitcherCanvasUpdate(false)
 end
 
 local function eventHasCommand(event)
@@ -1760,8 +1927,6 @@ switcher.eventTap = hs.eventtap.new({
   hs.eventtap.event.types.flagsChanged,
   hs.eventtap.event.types.keyDown,
   hs.eventtap.event.types.keyUp,
-  hs.eventtap.event.types.leftMouseDragged,
-  hs.eventtap.event.types.leftMouseUp,
 }, function(event)
   local eventType = event:getType()
   if eventType == hs.eventtap.event.types.keyDown and event:getKeyCode() == hs.keycodes.map.escape then
@@ -1772,20 +1937,6 @@ switcher.eventTap = hs.eventtap.new({
   end
 
   if not switcher.active then
-    return false
-  end
-
-  if eventType == hs.eventtap.event.types.leftMouseDragged then
-    if switcher.dragState and updateAppDrag() then
-      return false
-    end
-    return false
-  end
-
-  if eventType == hs.eventtap.event.types.leftMouseUp then
-    if switcher.dragState and finishAppDrag() then
-      return true
-    end
     return false
   end
 
@@ -1918,6 +2069,7 @@ function currentScreenSwitcherStatus()
     candidates = #switcher.candidates,
     selectedIndex = switcher.selectedIndex,
     overlayVisible = switcherOverlayVisible(),
+    displayTimerPending = switcher.displayTimer ~= nil,
     verticalScreenLayout = screensAreVerticallyStacked(hs.screen.allScreens()),
     commandDown = commandCurrentlyDown(),
     maximizeWindowOnSwitch = maximizeWindowOnSwitch,
@@ -1927,6 +2079,7 @@ function currentScreenSwitcherStatus()
     visibleStartIndex = switcher.visibleStartIndex,
     visibleEndIndex = switcher.visibleEndIndex,
     eventTapEnabled = switcher.eventTap and switcher.eventTap:isEnabled() or false,
+    mouseDragTapEnabled = switcher.mouseDragTap and switcher.mouseDragTap:isEnabled() or false,
   }
 end
 

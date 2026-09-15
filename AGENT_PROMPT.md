@@ -15,6 +15,7 @@ macOS 原生 `Cmd+Tab` 是全局 App MRU 列表。双屏或多屏时，用户在
 - 所有屏幕行中，多窗口 App 按窗口展开为多个候选项，单窗口 App 仍作为一个候选项。
 - 按住 `Cmd` 后，多次按 `Tab` 应能选择更老的 App，不能只在最近两个 App 之间来回跳。
 - 松开 `Cmd` 后聚焦选中的 App。
+- 快速 `Cmd+Tab` 应直接切换，不绘制面板；按住 `Cmd` 超过约 `0.3s` 后才显示面板。
 - 显示类似原生切换器的悬浮图标面板。
 - 鼠标点击面板中的 App 图标时直接切换到该 App。
 - 鼠标悬停到面板中的 App 图标时先选中该 App。
@@ -100,7 +101,8 @@ macOS 原生 `Cmd+Tab` 是全局 App MRU 列表。双屏或多屏时，用户在
 - 用 `window:screen()` 与当前屏幕匹配。
 - 所有屏幕行都用 App 的 `bundleID` 分组，并在 App 有多个窗口时展开为多个 tile。
 - 一个 App 的多个窗口会变成多个 tile；只有单窗口 App 保持为 App tile。
-- 候选顺序优先使用当前屏幕自己的 App MRU，再用 `hs.window.orderedWindows()` 补齐当前可见但还没有历史记录的 App。
+- 展开窗口模式下，候选顺序应优先使用自维护的每屏窗口 MRU，再用 `hs.window.orderedWindows()` / 补充的最小化窗口顺序兜底，不能先按 App 分组再展开，否则同 App 多窗口会把其他 App 挤到后面。
+- 非展开聚合模式才使用当前屏幕自己的 App MRU，再用窗口顺序补齐当前可见但还没有历史记录的 App。
 - 展开候选时，每个窗口 tile 的 `candidate.window` 是具体窗口，`candidate.name` 使用窗口标题。
 - 单窗口 App tile 或未展开候选仍保存同 App、同屏幕的所有窗口：`candidate.windows` 和 `candidate.windowCount`。
 
@@ -109,6 +111,7 @@ macOS 原生 `Cmd+Tab` 是全局 App MRU 列表。双屏或多屏时，用户在
 - 使用 `hs.window.filter.default:subscribe(hs.window.filter.windowFocused, callback)` 监听窗口聚焦。
 - 聚焦事件发生时，根据 `window:screen()` 和 App `bundleID` 更新 `screenMRU[screenKey]`。
 - `screenMRU[screenKey]` 是 App key 列表，最新聚焦 App 放到第一个。
+- 同时维护 `screenWindowMRU[screenKey]`，保存窗口 ID 列表，最新聚焦窗口放到第一个；展开窗口 tile 时优先按它排序。
 - Hammerspoon reload 前应调用 `hs.window.filter.default:unsubscribe(nil, oldCallback)` 移除旧回调。
 - 在开始切换前调用一次 `recordWindowFocus(hs.window.focusedWindow())`，保证当前 App 在当前屏幕 MRU 首位。
 
@@ -124,6 +127,7 @@ macOS 原生 `Cmd+Tab` 是全局 App MRU 列表。双屏或多屏时，用户在
 - 后续 `F18/F19` 只移动 `selectedIndex`，不要重新枚举窗口。
 - 这样可以避免切过去后 MRU 重排，导致只能在最近两个 App 之间来回跳。
 - 会话中应保留 `screenGroups`，其中当前屏幕组用于键盘选择，其他屏幕组仅用于展示和鼠标点击。
+- 候选构建和选中移动应立即完成，但 `drawSwitcherCanvas()` 应延迟约 `0.3s`；如果 `Cmd` 在延迟内释放，直接 `finishSwitcher()`，不要创建 canvas。
 
 Cmd 释放：
 
