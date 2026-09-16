@@ -46,7 +46,7 @@ local function appKey(window)
   return app:bundleID() or app:name()
 end
 
-local function isUsableWindow(window)
+local function isUsableWindow(window, includeMinimized)
   if not window then
     return false
   end
@@ -56,14 +56,19 @@ local function isUsableWindow(window)
     return false
   end
 
+  if includeMinimized == nil then
+    includeMinimized = showMinimizedWindows
+  end
+
   local minimized = window:isMinimized()
-  if showMinimizedWindows and minimized then
+  if includeMinimized and minimized then
     return window:screen() ~= nil
   end
 
   return window:isStandard()
     and window:screen() ~= nil
     and window:isVisible()
+    and not minimized
 end
 
 local function windowIdentity(window)
@@ -81,7 +86,11 @@ local function windowIdentity(window)
   return tostring(window)
 end
 
-local function candidateWindows()
+local function candidateWindows(includeMinimized)
+  if includeMinimized == nil then
+    includeMinimized = showMinimizedWindows
+  end
+
   local result = {}
   local seen = {}
 
@@ -97,7 +106,7 @@ local function candidateWindows()
     addWindow(window)
   end
 
-  if showMinimizedWindows then
+  if includeMinimized then
     for _, window in ipairs(hs.window.allWindows()) do
       addWindow(window)
     end
@@ -210,6 +219,18 @@ local function appIcon(window)
   return fallbackIcon
 end
 
+local function candidateIcon(candidate)
+  if candidate and candidate.icon then
+    return candidate.icon
+  end
+
+  local icon = appIcon(candidate and candidate.window)
+  if candidate then
+    candidate.icon = icon
+  end
+  return icon
+end
+
 local function truncateText(text, limit)
   if utf8 and utf8.len and utf8.len(text) and utf8.len(text) <= limit then
     return text
@@ -281,6 +302,18 @@ local function splitTextTwoLines(text, firstLimit, secondLimit)
   return firstLine, secondLine
 end
 
+local function framesAlmostEqual(a, b)
+  if not a or not b then
+    return false
+  end
+
+  local tolerance = 2
+  return math.abs(a.x - b.x) <= tolerance
+    and math.abs(a.y - b.y) <= tolerance
+    and math.abs(a.w - b.w) <= tolerance
+    and math.abs(a.h - b.h) <= tolerance
+end
+
 local function focusWindow(window)
   if not window then
     return
@@ -304,13 +337,16 @@ local function focusWindow(window)
     local screen = window:screen()
     if screen then
       pcall(function()
-        window:setFrame(screen:frame(), 0)
+        local targetFrame = screen:frame()
+        if not framesAlmostEqual(window:frame(), targetFrame) then
+          window:setFrame(targetFrame, 0)
+        end
       end)
     end
   end
 end
 
-local function appCandidatesOnScreen(screen, expandWindows)
+local function appCandidatesOnScreen(screen, expandWindows, includeMinimized)
   local targetScreenKey = screenKey(screen)
   local windowsByApp = {}
   local fallbackOrder = {}
@@ -318,8 +354,8 @@ local function appCandidatesOnScreen(screen, expandWindows)
   local windowByID = {}
   local result = {}
 
-  for _, window in ipairs(candidateWindows()) do
-    if isUsableWindow(window) and screenKey(window:screen()) == targetScreenKey then
+  for _, window in ipairs(candidateWindows(includeMinimized)) do
+    if isUsableWindow(window, includeMinimized) and screenKey(window:screen()) == targetScreenKey then
       local key = appKey(window)
       if key then
         if not windowsByApp[key] then
@@ -359,7 +395,6 @@ local function appCandidatesOnScreen(screen, expandWindows)
             key = key,
             appName = appName(window),
             name = windowTitle(window),
-            icon = appIcon(window),
             windows = { window },
             windowCount = #windows,
             windowIndex = windowIndexByID[windowIdentity(window)] or 1,
@@ -374,7 +409,6 @@ local function appCandidatesOnScreen(screen, expandWindows)
             key = key,
             appName = appName(window),
             name = appName(window),
-            icon = appIcon(window),
             windows = windows,
             windowCount = #windows,
             windowIndex = 1,
@@ -415,7 +449,6 @@ local function appCandidatesOnScreen(screen, expandWindows)
           key = key,
           appName = appName(window),
           name = windowTitle(window),
-          icon = appIcon(window),
           windows = { window },
           windowCount = #windows,
           windowIndex = index,
@@ -430,7 +463,6 @@ local function appCandidatesOnScreen(screen, expandWindows)
         key = key,
         appName = appName(window),
         name = appName(window),
-        icon = appIcon(window),
         windows = windows,
         windowCount = #windows,
         windowIndex = 1,
@@ -499,6 +531,7 @@ switcher.displayTimer = nil
 switcher.dragCanvas = nil
 switcher.mouseDragTap = nil
 switcher.candidates = {}
+switcher.candidatesIncludeMinimized = false
 switcher.screenGroups = {}
 switcher.selectedIndex = 1
 switcher.mode = "apps"
@@ -523,10 +556,15 @@ switcher.screenWindowMRU = switcher.screenWindowMRU or {}
 -- 这些对象必须挂到全局表上，避免 Hammerspoon 重新加载后被 Lua GC 回收。
 switcher.hotkeys = {}
 switcher.iconCache = appIconCache
-switcher.iconWarmupTimer = hs.timer.doAfter(0.2, function()
-  for _, window in ipairs(candidateWindows()) do
+switcher.iconWarmupTimer = hs.timer.doAfter(2.0, function()
+  local warmed = {}
+  for _, window in ipairs(hs.window.orderedWindows()) do
     if isUsableWindow(window) then
-      appIcon(window)
+      local key = appKey(window)
+      if key and not warmed[key] then
+        warmed[key] = true
+        appIcon(window)
+      end
     end
   end
 end)
@@ -716,6 +754,34 @@ local function requestSwitcherCanvasUpdate(immediate)
   end)
 end
 
+local function ensureCandidatesForVisibleSwitcher()
+  if not switcher.active or not switcher.screen or switcher.candidatesIncludeMinimized or not showMinimizedWindows then
+    return
+  end
+
+  local selectedCandidate = switcher.candidates and switcher.candidates[switcher.selectedIndex]
+  local selectedWindowID = selectedCandidate and windowIdentity(selectedCandidate.window) or nil
+  local candidates = appCandidatesOnScreen(switcher.screen, true, true)
+  if #candidates == 0 then
+    return
+  end
+
+  switcher.candidates = candidates
+  switcher.candidatesIncludeMinimized = true
+  switcher.screenGroups = nil
+
+  if selectedWindowID then
+    for index, candidate in ipairs(candidates) do
+      if windowIdentity(candidate.window) == selectedWindowID then
+        switcher.selectedIndex = index
+        return
+      end
+    end
+  end
+
+  switcher.selectedIndex = math.min(math.max(1, switcher.selectedIndex or 1), #candidates)
+end
+
 local function updateDragGhost(point)
   local drag = switcher.dragState
   if not drag or not drag.dragging or not drag.candidate then
@@ -741,7 +807,7 @@ local function updateDragGhost(point)
     })
     canvas:appendElements({
       type = "image",
-      image = candidate.icon,
+      image = candidateIcon(candidate),
       imageScaling = "scaleProportionally",
       frame = { x = (ghostWidth - 48) / 2, y = 10, w = 48, h = 48 },
     })
@@ -1168,6 +1234,7 @@ local function refreshSwitcherCandidates()
   end
 
   switcher.candidates = candidates
+  switcher.candidatesIncludeMinimized = showMinimizedWindows
   switcher.screenGroups = buildScreenGroups(switcher.screen, candidates)
   switcher.selectedIndex = math.min(math.max(1, switcher.selectedIndex or 1), #candidates)
   drawSwitcherCanvas()
@@ -1297,6 +1364,7 @@ end
 drawSwitcherCanvas = function()
   hideSwitcherCanvas()
   switcher.mode = "apps"
+  ensureCandidatesForVisibleSwitcher()
 
   local count = #switcher.candidates
   if count == 0 or not switcher.screen then
@@ -1422,7 +1490,7 @@ drawSwitcherCanvas = function()
 
       canvas:appendElements({
         type = "image",
-        image = candidate.icon,
+        image = candidateIcon(candidate),
         imageScaling = "scaleProportionally",
         frame = { x = itemX + 22, y = itemY + 10, w = 48, h = 48 },
       })
@@ -1683,7 +1751,7 @@ drawWindowCanvas = function()
 
   canvas:appendElements({
     type = "image",
-    image = candidate.icon,
+    image = candidateIcon(candidate),
     imageScaling = "scaleProportionally",
     frame = { x = panelPadding, y = panelPadding - 1, w = 40, h = 40 },
   })
@@ -1819,7 +1887,6 @@ buildCandidates = function(windows)
       window = appWindows[1] or window,
       key = key,
       name = appName(window),
-      icon = appIcon(window),
       windows = appWindows,
       windowCount = #appWindows,
     })
@@ -1872,13 +1939,12 @@ local function switchCurrentScreenApp(reverse)
   end
 
   recordWindowFocus(hs.window.focusedWindow())
-  local candidates = appCandidatesOnScreen(screen, true)
-  local groups = buildScreenGroups(screen, candidates)
-  if #groups == 1 and #candidates == 1 then
-    focusWindow(candidates[1].window)
-    return
+  local candidates = appCandidatesOnScreen(screen, true, false)
+  local candidatesIncludeMinimized = false
+  if #candidates == 0 and showMinimizedWindows then
+    candidates = appCandidatesOnScreen(screen, true, true)
+    candidatesIncludeMinimized = true
   end
-
   if #candidates == 0 then
     return
   end
@@ -1886,7 +1952,8 @@ local function switchCurrentScreenApp(reverse)
   switcher.active = true
   switcher.screen = screen
   switcher.candidates = candidates
-  switcher.screenGroups = groups
+  switcher.candidatesIncludeMinimized = candidatesIncludeMinimized
+  switcher.screenGroups = nil
   switcher.commandSession = true
 
   local focusedWindow = hs.window.focusedWindow()
@@ -2070,6 +2137,7 @@ function currentScreenSwitcherStatus()
     selectedIndex = switcher.selectedIndex,
     overlayVisible = switcherOverlayVisible(),
     displayTimerPending = switcher.displayTimer ~= nil,
+    candidatesIncludeMinimized = switcher.candidatesIncludeMinimized,
     verticalScreenLayout = screensAreVerticallyStacked(hs.screen.allScreens()),
     commandDown = commandCurrentlyDown(),
     maximizeWindowOnSwitch = maximizeWindowOnSwitch,

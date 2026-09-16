@@ -128,6 +128,8 @@ macOS 原生 `Cmd+Tab` 是全局 App MRU 列表。双屏或多屏时，用户在
 - 这样可以避免切过去后 MRU 重排，导致只能在最近两个 App 之间来回跳。
 - 会话中应保留 `screenGroups`，其中当前屏幕组用于键盘选择，其他屏幕组仅用于展示和鼠标点击。
 - 候选构建和选中移动应立即完成，但 `drawSwitcherCanvas()` 应延迟约 `0.3s`；如果 `Cmd` 在延迟内释放，直接 `finishSwitcher()`，不要创建 canvas。
+- 候选构建阶段不要调用 `hs.image.imageFromAppBundle`；图标应懒加载到 `candidate.icon`，只在绘制可见 tile 时读取。后台图标预热应延后并按 App 去重，避免冷启动抢占首次切换。
+- 秒切路径即使 `cmdTab.showMinimizedWindows=true` 也应先只枚举可见窗口；只有在面板真正显示前才用 `hs.window.allWindows()` 补充最小化窗口，并尽量保持当前选中窗口不变。
 
 Cmd 释放：
 
